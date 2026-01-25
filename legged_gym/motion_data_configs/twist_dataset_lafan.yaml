@@ -1,0 +1,234 @@
+# root_path: /home/yanjieze/projects/g1_wbc/humanoid-motion-imitation/track_dataset/twist_motion_dataset
+root_path: /home/pshinde31/Desktop/arm_teleop/gmar_lafan1_twist
+motions:
+- file: aiming1_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: aiming1_subject4_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: aiming2_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: aiming2_subject3_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: aiming2_subject5_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: dance1_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: dance1_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: dance1_subject3_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: dance2_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: dance2_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: dance2_subject3_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: dance2_subject4_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: dance2_subject5_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: fallAndGetUp1_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: fallAndGetUp1_subject4_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: fallAndGetUp1_subject5_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: fallAndGetUp2_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: fallAndGetUp2_subject3_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: fallAndGetUp3_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: fight1_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: fight1_subject3_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: fight1_subject5_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: fightAndSports1_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: fightAndSports1_subject4_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: ground1_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: ground1_subject4_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: ground1_subject5_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: ground2_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: ground2_subject3_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: jumps1_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: jumps1_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: jumps1_subject5_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: multipleActions1_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: multipleActions1_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: multipleActions1_subject3_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: multipleActions1_subject4_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles1_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles1_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles1_subject5_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles2_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles2_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles2_subject5_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles3_subject3_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles3_subject4_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles4_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles4_subject3_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles4_subject4_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles5_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles5_subject3_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles5_subject4_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles6_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles6_subject4_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: obstacles6_subject5_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: push1_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: pushAndFall1_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: pushAndFall1_subject4_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: pushAndStumble1_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: pushAndStumble1_subject3_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: pushAndStumble1_subject5_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: run1_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: run1_subject5_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: run2_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: run2_subject4_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: sprint1_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: sprint1_subject4_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: walk1_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: walk1_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: walk1_subject5_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: walk2_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: walk2_subject3_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: walk2_subject4_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: walk3_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: walk3_subject2_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: walk3_subject3_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: walk3_subject4_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: walk3_subject5_unitree_g1.pkl
+  weight: 1
+  description: general movement
+- file: walk4_subject1_unitree_g1.pkl
+  weight: 1
+  description: general movement

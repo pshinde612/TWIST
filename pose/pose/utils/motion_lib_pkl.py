@@ -1,11 +1,31 @@
 import os, pickle, yaml
 import logging
+import sys
+from types import ModuleType
 
+import numpy as np
 import torch
 
 from pose.utils.torch_utils import quat_diff, quat_to_exp_map, slerp
 from tqdm import tqdm
 logger = logging.getLogger(__name__)
+
+
+class _FakeModule(ModuleType):
+    def __init__(self, name, real=None):
+        super().__init__(name)
+        if real is not None:
+            self.__dict__.update(real.__dict__)
+
+
+# Backfill numpy._core aliases expected by pickles generated with NumPy 2.x.
+if "numpy._core" not in sys.modules:
+    sys.modules["numpy._core"] = _FakeModule("numpy._core", getattr(np, "core", None))
+
+if "numpy._core.multiarray" not in sys.modules:
+    core = getattr(np, "core", None)
+    multiarray = getattr(core, "multiarray", None) if core is not None else None
+    sys.modules["numpy._core.multiarray"] = _FakeModule("numpy._core.multiarray", multiarray)
 
 def smooth(x, box_pts, device):
     box = torch.ones(box_pts, device=device) / box_pts

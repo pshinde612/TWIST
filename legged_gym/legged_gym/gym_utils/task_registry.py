@@ -28,10 +28,12 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
+from __future__ import annotations
+
 from copy import deepcopy
 import os
 from datetime import datetime
-from typing import Tuple
+from typing import Tuple, TYPE_CHECKING
 import torch
 import numpy as np
 
@@ -40,7 +42,8 @@ from rsl_rl.runners import *
 
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 from .helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, set_seed, parse_sim_params
-from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
+if TYPE_CHECKING:
+    from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 
 class TaskRegistry():
     def __init__(self):

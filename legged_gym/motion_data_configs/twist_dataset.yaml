@@ -1,4 +1,5 @@
-root_path: /home/yanjieze/projects/g1_wbc/humanoid-motion-imitation/track_dataset/twist_motion_dataset
+# root_path: /home/yanjieze/projects/g1_wbc/humanoid-motion-imitation/track_dataset/twist_motion_dataset
+root_path: /home/pshinde31/Desktop/arm_teleop/gmar_lafan1_twist
 motions:
 - file: mocap/0.pkl
   weight: 100.0
