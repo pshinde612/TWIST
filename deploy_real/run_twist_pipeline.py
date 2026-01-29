@@ -2,7 +2,7 @@
 Single-threaded TWIST pipeline runner (sim or real).
 
 - No async/multiprocessing.
-- Retargeting is a stub: fill in `retarget_frame_from_human()`.
+- Retargeting can be a stub or BVH-based (see --retargeter).
 - Optionally logs sim/robot state to an .npz file for later analysis.
 """
 
@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -25,9 +26,15 @@ from data_utils.rot_utils import (
 )
 from data_utils.rot_utils import quatToEuler
 
+try:
+    from projects.g1_full_body_kinematic.sew_mimic_g1_full_body_bvh import SEWMimicG1FullBody
+    from projects.shared_devices.offline_lafan_bvh_reader_full_body import LafanBVHReaderV2
+except Exception:  # pragma: no cover - optional dependency for BVH retargeting
+    SEWMimicG1FullBody = None
+    LafanBVHReaderV2 = None
 
 
-# Retargeting stub (to replace)
+# Retargeting stubs + helpers
 
 @dataclass
 class RetargetFrame:
@@ -36,6 +43,158 @@ class RetargetFrame:
     root_vel: np.ndarray      # (3,)
     root_ang_vel: np.ndarray  # (3,)
     dof_pos: np.ndarray       # (23,) for G1 body dofs (no wrists)
+
+
+def _quat_normalize(q: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(q)
+    if norm < 1e-8:
+        return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+    return (q / norm).astype(np.float32)
+
+
+def _quat_conjugate(q: np.ndarray) -> np.ndarray:
+    return np.array([-q[0], -q[1], -q[2], q[3]], dtype=np.float32)
+
+
+def _quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    x1, y1, z1, w1 = q1
+    x2, y2, z2, w2 = q2
+    return np.array([
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+    ], dtype=np.float32)
+
+
+def _quat_to_axis_angle(q: np.ndarray) -> Tuple[np.ndarray, float]:
+    q = _quat_normalize(q)
+    if q[3] < 0.0:
+        q = -q
+    angle = 2.0 * np.arccos(np.clip(q[3], -1.0, 1.0))
+    s = np.sqrt(max(1.0 - q[3] * q[3], 0.0))
+    if s < 1e-6:
+        axis = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    else:
+        axis = q[:3] / s
+    return axis.astype(np.float32), float(angle)
+
+
+def _angular_velocity_from_quats(q_prev: np.ndarray, q_curr: np.ndarray, dt: float) -> np.ndarray:
+    if dt <= 0.0:
+        return np.zeros(3, dtype=np.float32)
+    q_prev = _quat_normalize(q_prev)
+    q_curr = _quat_normalize(q_curr)
+    q_rel = _quat_mul(_quat_conjugate(q_prev), q_curr)
+    axis, angle = _quat_to_axis_angle(q_rel)
+    return (axis * (angle / dt)).astype(np.float32)
+
+
+class BaseRetargeter:
+    def get_frame(self, frame_index: int, elapsed_time: float, dt: float) -> Optional[RetargetFrame]:
+        raise NotImplementedError
+
+
+class StubRetargeter(BaseRetargeter):
+    def __init__(self, human_data: np.ndarray) -> None:
+        self.human_data = human_data
+
+    def get_frame(self, frame_index: int, elapsed_time: float, dt: float) -> Optional[RetargetFrame]:
+        return retarget_frame_from_human(self.human_data, frame_index, dt)
+
+
+class BvhRetargeter(BaseRetargeter):
+    def __init__(
+        self,
+        bvh_path: Path,
+        mapping_path: Optional[Path],
+        unit_scale: float,
+        playback_speed: float,
+        loop_mode: str,
+        yaw_offset: float,
+        remove_world_offset: bool,
+        retarget_xml: Path,
+        control_rate_hz: float,
+    ) -> None:
+        if SEWMimicG1FullBody is None or LafanBVHReaderV2 is None:
+            raise RuntimeError(
+                "BVH retargeting requires the installed 'projects' package. "
+                "Make sure it is available in your Python environment."
+            )
+
+        if not retarget_xml.exists():
+            raise FileNotFoundError(f"Retarget XML not found: {retarget_xml}")
+
+        self.bvh_reader = LafanBVHReaderV2(
+            bvh_path=bvh_path,
+            playback_speed=playback_speed,
+            loop_mode=loop_mode,
+            unit_scale=unit_scale,
+            yaw_offset=yaw_offset,
+            remove_world_offset=remove_world_offset,
+            mapping_path=mapping_path,
+        )
+
+        self.model = mujoco.MjModel.from_xml_path(str(retarget_xml))
+        self.data = mujoco.MjData(self.model)
+        if control_rate_hz > 0:
+            self.model.opt.timestep = 1.0 / control_rate_hz
+
+        self.controller = SEWMimicG1FullBody(
+            self.model,
+            self.data,
+            debug=False,
+            timing_enabled=False,
+            control_rate_hz=float(control_rate_hz),
+            elbow_filter_cutoff_hz=8.0,
+        )
+        self.controller.setup_mocap_and_scaling(
+            mocap_body_name="pelvis_mocap_mover",
+            mocap_cartesian_scale=np.array([1.0, 1.0, 1.0]),
+            mocap_offset=np.array([0.0, 0.0, -1.28]),
+            shoulder_width_scale=0.9,
+            hip_width_scale=0.9,
+        )
+
+        self._prev_root_pos = None
+        self._prev_root_rot = None
+
+    def get_frame(self, frame_index: int, elapsed_time: float, dt: float) -> Optional[RetargetFrame]:
+        action_dict = self.bvh_reader.get_action_dict_at_time(elapsed_time)
+        if action_dict is None:
+            return None
+
+        self.controller.update_control_from_csv_data(
+            action_dict,
+            engaged=True,
+            enable_lower_body_correction=True,
+        )
+        self.controller.apply_kinematic_control()
+        mujoco.mj_forward(self.model, self.data)
+
+        root_pos = self.data.mocap_pos[0].copy().astype(np.float32)
+        root_quat = self.data.mocap_quat[0].copy().astype(np.float32)  # wxyz
+        root_rot = np.array([root_quat[1], root_quat[2], root_quat[3], root_quat[0]], dtype=np.float32)  # xyzw
+
+        action_29dof = self.controller.get_current_29dof_joint_actions()
+        left_leg = action_29dof["left_leg"]
+        right_leg = action_29dof["right_leg"]
+        torso = action_29dof["torso"]
+        left_arm = action_29dof["left_arm"][:4]
+        right_arm = action_29dof["right_arm"][:4]
+        dof_pos = np.concatenate([left_leg, right_leg, torso, left_arm, right_arm]).astype(np.float32)
+
+        if self._prev_root_pos is None or self._prev_root_rot is None:
+            root_vel = np.zeros(3, dtype=np.float32)
+            root_ang_vel = np.zeros(3, dtype=np.float32)
+        else:
+            root_vel = (root_pos - self._prev_root_pos) / max(dt, 1e-6)
+            root_ang_vel = _angular_velocity_from_quats(self._prev_root_rot, root_rot, dt)
+
+        self._prev_root_pos = root_pos
+        self._prev_root_rot = root_rot
+
+        return RetargetFrame(root_pos, root_rot, root_vel, root_ang_vel, dof_pos)
 
 
 def retarget_frame_from_human(human_data: np.ndarray, idx: int, dt: float) -> RetargetFrame:
@@ -279,32 +438,61 @@ app = typer.Typer(add_completion=False)
 
 @app.command()
 def run(
-    input_human_file: str = typer.Argument(..., help="Human pose data file (format up to you)."),
+    input_human_file: str = typer.Option("/home/pshinde31/Desktop/arm_teleop/lafan_dataset/aiming1_subject1.bvh", help="Human pose data file (format up to you)."),
     mode: str = typer.Option("sim", help="Run mode: sim (real is TODO)."),
+    retargeter: str = typer.Option("bvh", help="Retargeter: stub or bvh."),
     policy_path: str = typer.Option("assets/twist_general_motion_tracker.pt", help="TorchScript policy."),
     xml_file: str = typer.Option("assets/g1/g1_sim2sim_with_wrist_roll.xml", help="MuJoCo XML (sim only)."),
+    retarget_xml: str = typer.Option(
+        "/home/pshinde31/GitHub/SEW-Geometric-Teleop/projects/g1_full_body_kinematic/g1/g1_29dof_mocap_ctrl_auto_gen.xml",
+        help="MuJoCo XML used for BVH retargeter (must include mocap bodies).",
+    ),
     device: str = typer.Option("cuda", help="cpu or cuda."),
     num_steps: int = typer.Option(1000, help="Number of control steps to run."),
+    control_dt: float = typer.Option(0.02, help="Control timestep (seconds)."),
     log_path: str = typer.Option("", help="Optional .npz output path for logging."),
     vis: bool = typer.Option(True, help="Enable MuJoCo viewer (sim only)."),
+    bvh_mapping_file: str = typer.Option("/home/pshinde31/GitHub/SEW-Geometric-Teleop/projects/g1_full_body_kinematic/g1/bvh_to_g1.json", help="Optional BVH->G1 mapping JSON."),
+    bvh_unit_scale: float = typer.Option(0.01, help="Scale applied to BVH positions."),
+    bvh_playback_speed: float = typer.Option(1.0, help="BVH playback speed multiplier."),
+    bvh_loop_mode: str = typer.Option("once", help="BVH loop mode: once or loop."),
+    bvh_yaw_offset: float = typer.Option(0.0, help="Yaw offset (degrees) applied to BVH."),
+    bvh_remove_world_offset: bool = typer.Option(True, help="Remove initial BVH world offset."),
 ) -> None:
     """Run TWIST in a single-threaded loop (sim or real)."""
     if mode not in {"sim"}:
         raise typer.BadParameter("mode must be 'sim' for now")
+    if retargeter not in {"stub", "bvh"}:
+        raise typer.BadParameter("retargeter must be 'stub' or 'bvh'")
 
     device_t = torch.device(device)
-    human_data = load_human_pose_file(input_human_file)
+    if retargeter == "bvh":
+        retargeter_obj: BaseRetargeter = BvhRetargeter(
+            bvh_path=Path(input_human_file),
+            mapping_path=Path(bvh_mapping_file) if bvh_mapping_file else None,
+            unit_scale=bvh_unit_scale,
+            playback_speed=bvh_playback_speed,
+            loop_mode=bvh_loop_mode,
+            yaw_offset=bvh_yaw_offset,
+            remove_world_offset=bvh_remove_world_offset,
+            retarget_xml=Path(retarget_xml),
+            control_rate_hz=1.0 / control_dt if control_dt > 0 else 50.0,
+        )
+    else:
+        human_data = load_human_pose_file(input_human_file)
+        retargeter_obj = StubRetargeter(human_data)
 
     log_records: List[Dict[str, np.ndarray]] = []
 
     if mode == "sim":
         runner = TwistSimRunner(xml_file=xml_file, policy_path=policy_path, device=device, vis=vis, record_video=False)
         runner.reset()
-
-        control_dt = 0.02
         for i in range(num_steps):
             t0 = time.time()
-            frame = retarget_frame_from_human(human_data, i, control_dt)
+            elapsed_time = i * control_dt
+            frame = retargeter_obj.get_frame(i, elapsed_time, control_dt)
+            if frame is None:
+                break
             mimic_obs = build_mimic_obs_from_frame(frame, device_t)
             step_log = runner.step(mimic_obs)
             if log_path:
