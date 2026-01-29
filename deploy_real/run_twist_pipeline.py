@@ -12,10 +12,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from collections import deque
 
 import numpy as np
 import torch
 import typer
+from tqdm import tqdm
 
 import mujoco
 import mujoco.viewer as mjv
@@ -26,12 +28,12 @@ from data_utils.rot_utils import (
 )
 from data_utils.rot_utils import quatToEuler
 
-try:
-    from projects.g1_full_body_kinematic.sew_mimic_g1_full_body_bvh import SEWMimicG1FullBody
-    from projects.shared_devices.offline_lafan_bvh_reader_full_body import LafanBVHReaderV2
-except Exception:  # pragma: no cover - optional dependency for BVH retargeting
-    SEWMimicG1FullBody = None
-    LafanBVHReaderV2 = None
+# try:
+from projects.g1_full_body_kinematic.sew_mimic_g1_full_body_bvh import SEWMimicG1FullBody
+from projects.shared_devices.offline_lafan_bvh_reader_full_body import LafanBVHReaderV2
+# except Exception:  # pragma: no cover - optional dependency for BVH retargeting
+#     SEWMimicG1FullBody = None
+#     LafanBVHReaderV2 = None
 
 
 # Retargeting stubs + helpers
@@ -116,11 +118,11 @@ class BvhRetargeter(BaseRetargeter):
         retarget_xml: Path,
         control_rate_hz: float,
     ) -> None:
-        if SEWMimicG1FullBody is None or LafanBVHReaderV2 is None:
-            raise RuntimeError(
-                "BVH retargeting requires the installed 'projects' package. "
-                "Make sure it is available in your Python environment."
-            )
+        # if SEWMimicG1FullBody is None or LafanBVHReaderV2 is None:
+        #     raise RuntimeError(
+        #         "BVH retargeting requires the installed 'projects' package. "
+        #         "Make sure it is available in your Python environment."
+        #     )
 
         if not retarget_xml.exists():
             raise FileNotFoundError(f"Retarget XML not found: {retarget_xml}")
@@ -134,6 +136,10 @@ class BvhRetargeter(BaseRetargeter):
             remove_world_offset=remove_world_offset,
             mapping_path=mapping_path,
         )
+        self.total_frames = self.bvh_reader._reader.bvh.num_frames
+        self.frame_time = self.bvh_reader._reader.bvh.frame_time
+        self.playback_speed = self.bvh_reader._reader.playback_speed
+        self.last_frame_index: Optional[int] = None
 
         self.model = mujoco.MjModel.from_xml_path(str(retarget_xml))
         self.data = mujoco.MjData(self.model)
@@ -160,6 +166,7 @@ class BvhRetargeter(BaseRetargeter):
         self._prev_root_rot = None
 
     def get_frame(self, frame_index: int, elapsed_time: float, dt: float) -> Optional[RetargetFrame]:
+        self.last_frame_index = self.bvh_reader._reader._frame_index_from_time(elapsed_time)
         action_dict = self.bvh_reader.get_action_dict_at_time(elapsed_time)
         if action_dict is None:
             return None
@@ -229,40 +236,40 @@ def load_human_pose_file(path: str) -> np.ndarray:
 
 def build_mimic_obs_from_frame(frame: RetargetFrame, device: torch.device) -> np.ndarray:
     """Build mimic_obs vector identical to server_high_level_motion_lib.py."""
-    root_pos = torch.tensor(frame.root_pos, device=device).view(1, 1, 3)
-    root_rot = torch.tensor(frame.root_rot, device=device).view(1, 1, 4)
-    root_vel = torch.tensor(frame.root_vel, device=device).view(1, 1, 3)
-    root_ang_vel = torch.tensor(frame.root_ang_vel, device=device).view(1, 1, 3)
+    root_pos = torch.tensor(frame.root_pos, device=device).view(1, 3)
+    root_rot = torch.tensor(frame.root_rot, device=device).view(1, 4)
+    root_vel = torch.tensor(frame.root_vel, device=device).view(1, 3)
+    root_ang_vel = torch.tensor(frame.root_ang_vel, device=device).view(1, 3)
 
     # rpy from quat
     roll, pitch, yaw = euler_from_quaternion(root_rot)
-    roll = roll.reshape(1, -1, 1)
-    pitch = pitch.reshape(1, -1, 1)
-    yaw = yaw.reshape(1, -1, 1)
+    roll = roll.view(1, 1)
+    pitch = pitch.view(1, 1)
+    yaw = yaw.view(1, 1)
 
     # velocities in root frame
-    root_vel = quat_rotate_inverse_torch(root_rot, root_vel).reshape(1, -1, 3)
-    root_ang_vel = quat_rotate_inverse_torch(root_rot, root_ang_vel).reshape(1, -1, 3)
+    root_vel = quat_rotate_inverse_torch(root_rot, root_vel).view(1, 3)
+    root_ang_vel = quat_rotate_inverse_torch(root_rot, root_ang_vel).view(1, 3)
 
     # Insert wrist slots into dof_pos (G1 expects 25 with wrists at [19,24])
-    dof_pos = torch.tensor(frame.dof_pos, device=device).view(1, 1, -1)
-    dof_pos_with_wrist = torch.zeros(1, 1, 25, device=device)
+    dof_pos = torch.tensor(frame.dof_pos, device=device).view(1, -1)
+    dof_pos_with_wrist = torch.zeros(1, 25, device=device)
     wrist_ids = [19, 24]
     other_ids = [i for i in range(25) if i not in wrist_ids]
     dof_pos_with_wrist[..., other_ids] = dof_pos
 
     mimic_obs = torch.cat(
         (
-            root_pos[..., 2:3],
+            root_pos[:, 2:3],
             roll, pitch, yaw,
             root_vel,
-            root_ang_vel[..., 2:3],
+            root_ang_vel[:, 2:3],
             dof_pos_with_wrist,
         ),
         dim=-1,
-    )[:, 0:1]
+    )
 
-    return mimic_obs.reshape(1, -1).detach().cpu().numpy().squeeze()
+    return mimic_obs.detach().cpu().numpy().squeeze()
 
 
 def extract_mimic_obs_to_body_and_wrist(mimic_obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -357,6 +364,11 @@ class TwistSimRunner:
         self.action_scale = 0.5
         self.ankle_idx = [4, 5, 10, 11]
         self.last_action = np.zeros(self.num_actions, dtype=np.float32)
+        self.n_mimic_obs = 31
+        self.n_proprio = self.n_mimic_obs + 3 + 2 + 3 * self.num_actions
+        self.proprio_history_buf = deque(maxlen=10)
+        for _ in range(10):
+            self.proprio_history_buf.append(np.zeros(self.n_proprio, dtype=np.float32))
 
     def reset(self) -> None:
         mujoco.mj_resetData(self.model, self.data)
@@ -402,8 +414,11 @@ class TwistSimRunner:
 
         action_mimic, wrist_dof_pos = extract_mimic_obs_to_body_and_wrist(mimic_obs)
         obs_full = np.concatenate([action_mimic, obs_proprio])
+        obs_hist = np.array(self.proprio_history_buf, dtype=np.float32).flatten()
+        obs_buf = np.concatenate([obs_full, obs_hist])
+        self.proprio_history_buf.append(obs_full)
 
-        obs_tensor = torch.from_numpy(obs_full).float().unsqueeze(0).to(self.device)
+        obs_tensor = torch.from_numpy(obs_buf).float().unsqueeze(0).to(self.device)
         with torch.no_grad():
             raw_action = self.policy(obs_tensor).cpu().numpy().squeeze()
         self.last_action = raw_action
@@ -487,6 +502,11 @@ def run(
     if mode == "sim":
         runner = TwistSimRunner(xml_file=xml_file, policy_path=policy_path, device=device, vis=vis, record_video=False)
         runner.reset()
+        progress = None
+        last_progress_idx = None
+        if isinstance(retargeter_obj, BvhRetargeter) and bvh_loop_mode == "once":
+            progress = tqdm(total=retargeter_obj.total_frames, desc="BVH playback", unit="frame")
+
         for i in range(num_steps):
             t0 = time.time()
             elapsed_time = i * control_dt
@@ -499,9 +519,21 @@ def run(
                 step_log["time"] = np.array([i * control_dt], dtype=np.float32)
                 log_records.append(step_log)
 
+            if progress is not None:
+                cur_idx = retargeter_obj.last_frame_index
+                if cur_idx is not None:
+                    if last_progress_idx is None:
+                        progress.update(cur_idx + 1)
+                    else:
+                        progress.update(max(cur_idx - last_progress_idx, 0))
+                    last_progress_idx = cur_idx
+
             elapsed = time.time() - t0
             if elapsed < control_dt:
                 time.sleep(control_dt - elapsed)
+
+        if progress is not None:
+            progress.close()
 
     else:
         raise NotImplementedError("Real-robot mode is not wired in yet.")
