@@ -18,24 +18,24 @@ from data_utils.rot_utils import quatToEuler, quat_rotate_inverse
 from robot_control.joycon_wrapper import JoyConController
 from robot_control.speaker import Speaker
 
-# 和原脚本保持一致的常量
-BUFFER_START_IDX = 0  # 缓冲区可在开始时忽略若干帧数据
-LOOKAHEAD = 2         # 为估计加速度使用多少帧的向前查看
+# Constants kept consistent with the original script
+BUFFER_START_IDX = 0  # The buffer can ignore a few frames at startup
+LOOKAHEAD = 2         # How many frames to look ahead for acceleration estimation
 RESET_THRESHOLD = 120
-# SEED_BUFFER_SAMPLES = 10  # 在开始时采集多少帧种子数据
+# SEED_BUFFER_SAMPLES = 10  # How many seed frames to collect at startup
 SEED_BUFFER_SAMPLES = 3
 
 class ResetError(Exception):
     """
-    用于在需要时向上层抛出重置信号。
+    Used to raise a reset signal to the upper layer when needed.
     """
     pass
 
 
 class ViconDataBuffer:
     """
-    存储来自 OptiTrack（Vicon）的一系列帧 (frame_time, qpos)，
-    以及在 push() 时进行 retarget。
+    Stores a sequence of frames (frame_time, qpos) from OptiTrack (Vicon),
+    and performs retargeting on push().
     """
     def __init__(self, client, model_file, ik_config, ik_match_table):
         self.client = client
@@ -49,17 +49,17 @@ class ViconDataBuffer:
         self._buffer = []
 
     def push(self):
-        # 从 OptiTrack 读取
+        # Read from OptiTrack
         vicon_data = self.client.get_frame()
         frame_number = self.client.frame_number()
         # print("frame_number: ", frame_number)
-        # 进行 retarget
+        # Perform retarget
         self.mink_retarget.update_targets(vicon_data)
         curr_error = self.mink_retarget.error()
         qpos = self.mink_retarget.retarget(vicon_data)
         next_error = self.mink_retarget.error()
 
-        # 让 retarget 多次迭代，直至误差收敛
+        # Iterate retargeting until the error converges
         num_iter = 0
         max_iter = 20
         while curr_error - next_error > 0.001:
@@ -69,17 +69,17 @@ class ViconDataBuffer:
             num_iter += 1
             if num_iter > max_iter:
                 break
-        # 将 (时间戳, retarget 后的 qpos) 存入缓冲
+        # Store (timestamp, retargeted qpos) in the buffer
         self._buffer.append((frame_number / 120.0, qpos.copy(), vicon_data.copy()))
 
     def pushN(self, n):
-        """连续读取 n 帧。"""
+        """Read n frames continuously."""
         start_len = self.length
         while self.length - start_len < n:
             self.push()
 
     def pop(self):
-        assert self.length > 0, "buffer 为空"
+        assert self.length > 0, "buffer is empty"
         return self._buffer[-1]
 
     def clear(self):
@@ -107,8 +107,8 @@ class ViconDataBuffer:
 
 def _get_mimic_obs(qpos, qdot):
     """
-    与原脚本保持一致：将 qpos, qdot 转换为 mimic_obs 的过程。
-    这里任何一行都未简化，以保证和原脚本一致。
+    Keep consistent with the original script: process converting qpos, qdot to mimic_obs.
+    No line is simplified to keep parity with the original script.
     """
     root_pos = qpos[:3]
     dof_pos  = qpos[7:]
@@ -120,7 +120,7 @@ def _get_mimic_obs(qpos, qdot):
     root_vel = qdot[:3]
     root_rot = root_rot.reshape(1, 4)
     root_vel = root_vel.reshape(1, 3)
-    # 这里注意顺序 [1,2,3,0]
+    # Note the order [1,2,3,0] here
     root_rot = root_rot[:, [1,2,3,0]]
     root_vel_relative = quat_rotate_inverse(root_rot, root_vel).reshape(3)
     root_ang_vel = qdot[3:6]
@@ -132,7 +132,7 @@ def _get_mimic_obs(qpos, qdot):
         [roll, pitch, yaw],    # roll, pitch, yaw, 3
         root_vel_relative,     # root vel in local frame, 3
         root_ang_vel_relative_yaw,          # root ang vel in local frame, 1
-        dof_pos                # 关节角, 21 for t1, 23 for g1
+        dof_pos                # Joint angles, 21 for t1, 23 for g1
     ])
     # print("shape of mimic_obs: ", mimic_obs.shape)
     return mimic_obs
@@ -140,22 +140,22 @@ def _get_mimic_obs(qpos, qdot):
 
 class OptiTrackMimicObsServer:
     """
-    用于：  
-    1. 连接 OptiTrack  
-    2. 不断获取 mocap 数据，做 retarget  
-    3. 通过 get_id_data 得到 (qpos, qdot)  
-    4. 调用 _get_mimic_obs  
-    5. 再通过 Redis 对外发送
+    Used to:
+    1. Connect to OptiTrack
+    2. Continuously get mocap data and retarget
+    3. Get (qpos, qdot) via get_id_data
+    4. Call _get_mimic_obs
+    5. Publish via Redis
     """
     def __init__(self, vicon_host, ik_config_path, xml_file, robot_type, vis=False, use_hand=False):
-        # 初始化 Vicon
+        # Initialize Vicon
         self.client = setup_optitrack(vicon_host)
         print(f"Client initialized")
-        # 读取 IK 配置
+        # Load IK config
         with open(ik_config_path) as f:
             self.ik_config = json.load(f)
         self.ik_match_table = self.ik_config.pop("ik_match_table")
-        # 修正 ik_match_table 里的数组类型
+        # Fix array types in ik_match_table
         for key, val in self.ik_match_table.items():
             self.ik_match_table[key][-2] = np.array(val[-2])
             self.ik_match_table[key][-1] = np.array(val[-1])
@@ -174,7 +174,7 @@ class OptiTrackMimicObsServer:
         self.use_hand = use_hand
         # assert self.use_hand and self.robot_type == "g1", "hand control is only supported for g1"
         
-        # ViconDataBuffer 用于记录多帧数据
+        # ViconDataBuffer stores multiple frames
         self.vicon_data_buffer = ViconDataBuffer(
             self.client, 
             xml_file, 
@@ -182,10 +182,10 @@ class OptiTrackMimicObsServer:
             self.ik_match_table
         )
 
-        # Redis 连接（确保本机/远程有 Redis 服务）
+        # Redis connection (ensure local/remote Redis is running)
         self.redis_client = redis.Redis(host='localhost', port=6379, db=0)
 
-        # 先收集几帧，避免刚启动时数据不稳定
+        # Collect a few frames first to avoid unstable data at startup
         self.vicon_data_buffer.pushN(SEED_BUFFER_SAMPLES)
         self.curr_buffer_idx = BUFFER_START_IDX
         
@@ -227,7 +227,8 @@ class OptiTrackMimicObsServer:
 
     def teleop_mode(self, freq=50):
         """
-        以固定频率 freq（默认 30Hz）从 Vicon 拉取数据，计算 mimic obs 并通过 Redis 发布。
+        Pull data from Vicon at fixed frequency freq (default 30Hz),
+        compute mimic obs, and publish via Redis.
         """
         print(f"[Teleop Mode] Start running at {freq} Hz ...")
         self.speaker.speak(f"Start Teleoperation Mode")
@@ -303,7 +304,7 @@ class OptiTrackMimicObsServer:
             if self.vis:
                 self.vis_qpos(q0)
 
-            # 保持固定频率
+            # Keep fixed frequency
             rate.sleep()
             fps = 1 / (time.time() - t_start)
             # if self.curr_buffer_idx % 100 == 0:
@@ -400,16 +401,16 @@ class OptiTrackMimicObsServer:
                         qpos  = self.vicon_data_buffer.qpos
                         
                         if self.curr_buffer_idx + LOOKAHEAD >= len(times):
-                            # 如果缓冲区长度还不够，就等下一帧
+                            # If the buffer is not long enough, wait for the next frame
                             pass
                         else:
-                            # 取一个窗口来计算加速度
+                            # Take a window to compute acceleration
                             window_size = 100
                             start_idx = max(
                                 0, 
                                 self.curr_buffer_idx + LOOKAHEAD + 1 - window_size
                             )
-                            # 使用 get_id_data 计算更平滑的 (q0, qdot0)
+                            # Use get_id_data to compute smoother (q0, qdot0)
                             q0, qdot0 = get_id_data(
                                 times[start_idx : self.curr_buffer_idx + LOOKAHEAD + 1],
                                 qpos[start_idx : self.curr_buffer_idx + LOOKAHEAD + 1],
@@ -503,3 +504,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+# Stored from

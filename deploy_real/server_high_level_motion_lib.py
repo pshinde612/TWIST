@@ -28,7 +28,16 @@ def build_mimic_obs(
     tar_obs_steps,
     robot_type: str = "g1"
 ):
-    """
+    """0.132, -0.229, -0.035,  0.135, -0.196, │                                                                                           │
+│ │                │      -0.001,  0.149, -0.283,  0.099, -0.009, -0.033,  0.144,  0.263,             │                                                                                           │
+│ │                │   │   1.44 ,  0.453,  1.151,  0.142, -1.474, -0.273,  1.171],                    │                                                                                           │
+│ │                │     dtype=float32)                                                               │                                                                                           │
+│ │                )                                                                                  │                                                                                           │
+│ │ root_ang_vel = tensor([[[0., 0., 0.]]], device='cuda:0')                                          │                                                                                           │
+│ │     root_pos = tensor([[[-0.0157, -0.0064,  0.8412]]], device='cuda:0')                           │                                                                                           │
+│ │     root_rot = tensor([[[ 0.0172, -0.0504, -0.0106,  0.9985]]], device='cuda:0')                  │                                                                                           │
+│ │     root_vel = tensor([[[0., 0., 0.]]], device='cuda:0')                                          │                                                                                           │
+│ ╰────────────────────────────────────────────────────────────────────────────────
     Build the mimic_obs at time-step t_step, referencing the code in MimicRunner.
     """
     device = torch.device("cuda")
@@ -149,6 +158,17 @@ def main(args, xml_file, robot_base):
             mimic_obs_list = mimic_obs.tolist() if mimic_obs.ndim == 1 else mimic_obs.flatten().tolist()
             redis_client.set(f"action_mimic_{args.robot}", json.dumps(mimic_obs_list))
             redis_client.set(f"action_hand_{args.robot}", json.dumps(DEFAULT_ACTION_HAND[args.robot].tolist()))
+            # Publish reference qpos (MuJoCo order: pos(3), quat(wxyz), dof_pos(25))
+            root_rot_wxyz = root_rot[[3, 0, 1, 2]]
+            qpos_ref = np.concatenate([root_pos, root_rot_wxyz, dof_pos]).astype(np.float32)
+            redis_client.set(
+                f"qpos_ref_{args.robot}",
+                json.dumps({
+                    "frame": t_step,
+                    "time": t_step * control_dt,
+                    "qpos": qpos_ref.tolist(),
+                }),
+            )
             last_mimic_obs = mimic_obs
             # Print or log it
             print(f"Step {t_step:4d} => mimic_obs shape = {mimic_obs.shape} published...", end="\r")
@@ -157,8 +177,7 @@ def main(args, xml_file, robot_base):
                 sim_data.qpos[:3] = root_pos
                 # filp rot
                 # root_rot = root_rot[[1,2,3,0]]
-                root_rot = root_rot[[3,0,1,2]]
-                sim_data.qpos[3:7] = root_rot
+                sim_data.qpos[3:7] = root_rot_wxyz
                 sim_data.qpos[7:] = dof_pos
                 mujoco.mj_forward(sim_model, sim_data)
                 robot_base_pos = sim_data.xpos[sim_model.body(robot_base).id]
@@ -211,6 +230,7 @@ if __name__ == "__main__":
     parser.add_argument("--vis", action="store_true", help="Visualize the motion")
     args = parser.parse_args()
 
+    # Respect CLI flag for visualization
     args.vis = True
     
     print("Robot type: ", args.robot)

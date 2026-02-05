@@ -1,4 +1,5 @@
 import argparse
+import csv
 import json
 import time
 import numpy as np
@@ -12,6 +13,47 @@ from tqdm import tqdm
 from data_utils.params import DEFAULT_MIMIC_OBS
 import os
 from data_utils.rot_utils import quatToEuler
+
+def _format_error_bar(value, max_value=1.0, width=20):
+    if value is None:
+        return " " * width, 0.0
+    v = float(max(0.0, min(value, max_value)))
+    filled = int(round((v / max_value) * width)) if max_value > 0 else 0
+    bar = "█" * filled + "░" * (width - filled)
+    return bar, v
+
+
+def _make_csv_header(prefix: str, length: int):
+    return ["frame_idx", "time"] + [f"{prefix}_{i}" for i in range(length)]
+
+
+def _coerce_length(arr, length: int):
+    if arr is None:
+        return np.full(length, np.nan, dtype=np.float32)
+    arr = np.asarray(arr, dtype=np.float32).flatten()
+    if arr.size == length:
+        return arr
+    if arr.size > length:
+        return arr[:length]
+    out = np.full(length, np.nan, dtype=np.float32)
+    out[:arr.size] = arr
+    return out
+
+
+class CsvLogger:
+    def __init__(self, path, header):
+        self.path = path
+        self.file = open(path, "w", newline="")
+        self.writer = csv.writer(self.file)
+        if header:
+            self.writer.writerow(header)
+
+    def log(self, row):
+        self.writer.writerow(row)
+        self.file.flush()
+
+    def close(self):
+        self.file.close()
 
 def draw_root_velocity(mujoco_model, mujoco_data, mujoco_viewer, tgt_root_vel, init_geom_id, root_name, rgba_velocity=[1, 1, 0, 1]):
     """
@@ -72,7 +114,10 @@ class RealTimePolicyController:
                  xml_file, 
                  policy_path, 
                  device='cuda', 
-                 record_video=False):
+                 record_video=False,
+                 log_dir=None,
+                 log_prefix="g1_sim",
+                 headless=False):
         
         self.redis_client = None
         try:
@@ -108,12 +153,14 @@ class RealTimePolicyController:
             print(f"Motor ID {i}: {motor_name}")
             
 
-        self.viewer = mjv.launch_passive(self.model, self.data, show_left_ui=False, show_right_ui=False)
-        self.viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_PERTFORCE] = 0
-        self.viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = 0
-        self.viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = 0
-        self.viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_COM] = 0
-        self.viewer.cam.distance = 2.0
+        self.viewer = None
+        if not headless:
+            self.viewer = mjv.launch_passive(self.model, self.data, show_left_ui=False, show_right_ui=False)
+            self.viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_PERTFORCE] = 0
+            self.viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = 0
+            self.viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = 0
+            self.viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_COM] = 0
+            self.viewer.cam.distance = 2.0
 
         # Example defaults & placeholders
         self.num_actions = 23
@@ -183,7 +230,84 @@ class RealTimePolicyController:
         for _ in range(10):
             self.proprio_history_buf.append(np.zeros(self.n_proprio))
 
-        self.record_video = record_video
+        self.record_video = record_video if not headless else False
+        self.headless = headless
+        self.log_dir = log_dir
+        self.log_prefix = log_prefix
+        self.qpos_ref_logger = None
+        self.pd_target_logger = None
+        self.qpos_sim_logger = None
+        self.control_dt = self.sim_dt * self.sim_decimation
+        self._pending_log = None
+        self.last_joint_error = None
+        if self.log_dir:
+            os.makedirs(self.log_dir, exist_ok=True)
+            self._init_loggers()
+
+    def _init_loggers(self):
+        qpos_len = int(self.model.nq)
+        qpos_ref_path = os.path.join(self.log_dir, f"{self.log_prefix}_qpos_ref.csv")
+        pd_target_path = os.path.join(self.log_dir, f"{self.log_prefix}_pd_target.csv")
+        qpos_sim_path = os.path.join(self.log_dir, f"{self.log_prefix}_qpos_sim.csv")
+        self.qpos_ref_logger = CsvLogger(qpos_ref_path, _make_csv_header("qpos", qpos_len))
+        self.pd_target_logger = CsvLogger(pd_target_path, _make_csv_header("qpos", qpos_len))
+        self.qpos_sim_logger = CsvLogger(qpos_sim_path, _make_csv_header("qpos", qpos_len))
+
+    def _fetch_ref_qpos(self, fallback_frame_idx: int, fallback_time: float):
+        frame_idx = fallback_frame_idx
+        time_ref = fallback_time
+        qpos_ref = None
+        if self.redis_client is None:
+            return qpos_ref, frame_idx, time_ref
+        msg = self.redis_client.get("qpos_ref_g1")
+        if msg is None:
+            return qpos_ref, frame_idx, time_ref
+        payload = json.loads(msg)
+        if isinstance(payload, dict):
+            frame_idx = int(payload.get("frame", frame_idx))
+            time_ref = float(payload.get("time", time_ref))
+            qpos_ref = payload.get("qpos", None)
+        else:
+            qpos_ref = payload
+        return qpos_ref, frame_idx, time_ref
+
+    def _flush_pending_log(self):
+        if self._pending_log is None:
+            return
+        frame_idx = self._pending_log["frame_idx"]
+        time_ref = self._pending_log["time"]
+        qpos_ref = _coerce_length(self._pending_log["qpos_ref"], int(self.model.nq))
+        pd_target = _coerce_length(self._pending_log["pd_target"], int(self.stiffness.shape[0]))
+        qpos_sim = _coerce_length(self._pending_log["qpos_sim"], int(self.model.nq))
+        qpos_root = None
+        if self._pending_log.get("qpos_ref") is not None and len(qpos_ref) >= 7:
+            qpos_root = qpos_ref[:7]
+        elif self._pending_log.get("qpos_sim_start") is not None:
+            qpos_root = _coerce_length(self._pending_log["qpos_sim_start"], int(self.model.nq))[:7]
+        if qpos_root is None or len(qpos_root) < 7:
+            qpos_root = np.full(7, np.nan, dtype=np.float32)
+        qpos_pd_target = np.concatenate([qpos_root, pd_target]).astype(np.float32)
+        if self.qpos_ref_logger:
+            self.qpos_ref_logger.log([frame_idx, time_ref, *qpos_ref.tolist()])
+        if self.pd_target_logger:
+            self.pd_target_logger.log([frame_idx, time_ref, *qpos_pd_target.tolist()])
+        if self.qpos_sim_logger:
+            self.qpos_sim_logger.log([frame_idx, time_ref, *qpos_sim.tolist()])
+        self._pending_log = None
+    
+    def _update_error_overlay(self):
+        if self.viewer is None:
+            return
+        bar, v = _format_error_bar(self.last_joint_error, max_value=1.0, width=18)
+        title = "Mean Joint Error"
+        body = f"{v:.4f} rad\\n{bar}"
+        try:
+            if hasattr(self.viewer, "overlay"):
+                self.viewer.overlay[mujoco.mjtGridPos.mjGRID_TOPRIGHT] = (title, body)
+            if hasattr(self.viewer, "_overlay"):
+                self.viewer._overlay[mujoco.mjtGridPos.mjGRID_TOPRIGHT] = (title, body)
+        except Exception:
+            pass
 
     def extract_data(self):
         qpos = self.data.qpos.astype(np.float32)
@@ -272,6 +396,10 @@ class RealTimePolicyController:
                     except:
                         raise Exception("cannot get action mimic from redis")
 
+                    control_step_idx = i // self.sim_decimation
+                    control_time = control_step_idx * self.control_dt
+                    qpos_ref, ref_frame_idx, ref_time = self._fetch_ref_qpos(control_step_idx, control_time)
+
                     obs_full = np.concatenate([action_mimic, obs_proprio])
                     obs_hist = np.array(self.proprio_history_buf).flatten()
                     obs_buf = np.concatenate([obs_full, obs_hist])
@@ -286,17 +414,33 @@ class RealTimePolicyController:
                     scaled_actions = raw_action * self.action_scale
                     pd_target = scaled_actions + self.default_dof_pos
                     pd_target = aggregate_wrist_dof_pos(pd_target, wrist_dof_pos)
-                    # debug draw velocity arrow if you want
-                    self.viewer.user_scn.ngeom = 0
-                    draw_root_velocity(self.model, self.data, self.viewer, [0,0,0], 0, "pelvis", [1,0,0,1])
-                    
-                    # make camera follow the pelvis
-                    pelvis_pos = self.data.xpos[self.model.body("pelvis").id]
-                    self.viewer.cam.lookat = pelvis_pos
-                    self.viewer.sync()
-                    if mp4_writer is not None:
-                        img = self.viewer.read_pixels()
-                        mp4_writer.append_data(img)
+                    if qpos_ref is not None:
+                        qpos_ref_arr = np.asarray(qpos_ref, dtype=np.float32).flatten()
+                        if qpos_ref_arr.size >= (7 + pd_target.size):
+                            self.last_joint_error = float(np.mean(np.abs(pd_target - qpos_ref_arr[7:7 + pd_target.size])))
+                        else:
+                            self.last_joint_error = None
+                    if self.log_dir:
+                        self._pending_log = {
+                            "frame_idx": ref_frame_idx,
+                            "time": ref_time,
+                            "qpos_ref": qpos_ref,
+                            "pd_target": pd_target.copy(),
+                            "qpos_sim_start": self.data.qpos.astype(np.float32).copy(),
+                        }
+                    if self.viewer is not None:
+                        # debug draw velocity arrow if you want
+                        self.viewer.user_scn.ngeom = 0
+                        draw_root_velocity(self.model, self.data, self.viewer, [0,0,0], 0, "pelvis", [1,0,0,1])
+                        
+                        # make camera follow the pelvis
+                        pelvis_pos = self.data.xpos[self.model.body("pelvis").id]
+                        self.viewer.cam.lookat = pelvis_pos
+                        self._update_error_overlay()
+                        self.viewer.sync()
+                        if mp4_writer is not None:
+                            img = self.viewer.read_pixels()
+                            mp4_writer.append_data(img)
 
                 # PD control
                 torque = (pd_target - whole_body_dof) * self.stiffness - whole_body_dof_vel * self.damping
@@ -305,6 +449,9 @@ class RealTimePolicyController:
                 self.data.ctrl[:] = torque
                 
                 mujoco.mj_step(self.model, self.data)
+                if self.log_dir and (i + 1) % self.sim_decimation == 0 and self._pending_log is not None:
+                    self._pending_log["qpos_sim"] = self.data.qpos.astype(np.float32).copy()
+                    self._flush_pending_log()
                 # sleep to maintain real-time pace
                 elapsed = time.time() - t_start
                 if elapsed < self.sim_dt:
@@ -317,7 +464,14 @@ class RealTimePolicyController:
                 mp4_writer.close()
                 print("Video saved")
 
-            self.viewer.close()
+            if self.viewer is not None:
+                self.viewer.close()
+            if self.qpos_ref_logger:
+                self.qpos_ref_logger.close()
+            if self.pd_target_logger:
+                self.pd_target_logger.close()
+            if self.qpos_sim_logger:
+                self.qpos_sim_logger.close()
 
 
 def main_low_level_sim(args):
@@ -326,6 +480,9 @@ def main_low_level_sim(args):
         policy_path=args.policy_path,
         device='cuda',
         record_video=args.record_video,
+        log_dir=args.log_dir,
+        log_prefix=args.log_prefix,
+        headless=args.headless,
     )
     controller.run()
 
@@ -337,10 +494,13 @@ if __name__ == "__main__":
     parser.add_argument("--xml_file", default=os.path.join(HERE, "../assets/g1/g1_sim2sim_with_wrist_roll.xml"), help="Mujoco XML file")
     
     parser.add_argument("--policy_path",  help="Path to the policy",
-                        default="../assets/twist_general_motion_tracker.pt"
+                        default="/home/pshinde31/Desktop/arm_teleop/TWIST/assets/twist_general_motion_tracker.pt"
                         )
                         
     parser.add_argument("--record_video", action="store_true", help="Record a video")
+    parser.add_argument("--log_dir", default=None, help="Directory to write CSV logs")
+    parser.add_argument("--log_prefix", default="g1_sim", help="Prefix for CSV log files")
+    parser.add_argument("--headless", action="store_true", help="Run without MuJoCo viewer")
     args = parser.parse_args()
 
     args.record_proprio = True
